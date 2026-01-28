@@ -58,6 +58,23 @@ WebhookBox solves this by making Postgres the **source of truth**:
 
 ## Architecture (data flow)
 
+
+
+```text
+Your App
+  │  POST /events
+  ▼
+WebhookBox API (Axum)
+  │  writes events (idempotent)
+  ▼
+Postgres (source of truth)
+  ├─ tenants
+  ├─ events
+  ├─ endpoints         (next)
+  ├─ deliveries        (next)
+  ├─ attempts          (next)
+  └─ jobs / DLQ        (next)
+
                  ┌──────────────────────────────┐
                  │           Your App           │
                  │ (produces events: user.created│
@@ -118,23 +135,6 @@ WebhookBox solves this by making Postgres the **source of truth**:
               │   Customer Endpoint (URL)   │
               │   https://customer.com/...  │
               └─────────────────────────────┘
-
-
-```text
-Your App
-  │  POST /events
-  ▼
-WebhookBox API (Axum)
-  │  writes events (idempotent)
-  ▼
-Postgres (source of truth)
-  ├─ tenants
-  ├─ events
-  ├─ endpoints         (next)
-  ├─ deliveries        (next)
-  ├─ attempts          (next)
-  └─ jobs / DLQ        (next)
-````
 
 ---
 
