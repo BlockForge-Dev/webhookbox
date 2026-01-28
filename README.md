@@ -58,6 +58,68 @@ WebhookBox solves this by making Postgres the **source of truth**:
 
 ## Architecture (data flow)
 
+                 ┌──────────────────────────────┐
+                 │           Your App           │
+                 │ (produces events: user.created│
+                 │  invoice.paid, etc.)         │
+                 └───────────────┬──────────────┘
+                                 │  POST /events
+                                 ▼
+┌───────────────────────────────────────────────────────────┐
+│                    Webhook Box API (Axum)                 │
+│                                                           │
+│  - validates request                                      │
+│  - enforces idempotency                                  │
+│  - writes rows to Postgres                                │
+└───────────────┬───────────────────────────────┬───────────┘
+                │                               │
+                │ writes                         │ reads later
+                ▼                               ▼
+        ┌───────────────────┐           ┌────────────────────┐
+        │     Postgres       │           │  Webhook Box UI/API │
+        │  (source of truth) │           │  (timeline, replay) │
+        └───────┬───────────┘           └───────────┬────────┘
+                │                                   │
+                │ tables (core objects)             │ queries rows to
+                ▼                                   │ build “explanations”
+ ┌─────────────────────────────────────────────────────────────┐
+ │ tenants        endpoints         events         deliveries   │
+ │  - id           - id             - id            - id         │
+ │  - name         - tenant_id      - tenant_id     - event_id   │
+ │  - created_at   - url            - event_type    - endpoint_id│
+ │                - secret         - payload_json  - status      │
+ │                - enabled        - idem_key      - next_run_at │
+ │                                - created_at    - attempts_cnt│
+ │                                                             │
+ │ attempts                         jobs (pgqueue)              │
+ │  - delivery_id                   - job_type                   │
+ │  - attempt_no                    - payload_json               │
+ │  - status_code                   - run_at                      │
+ │  - error_type                    - locked_by/lease            │
+ │  - latency_ms                    - status                      │
+ │  - created_at                    - attempt                     │
+ └─────────────────────────────────────────────────────────────┘
+                │
+                │ enqueue job after creating delivery rows
+                ▼
+        ┌───────────────────────────┐
+        │      Postgres Queue       │
+        │  jobs table (scheduled)   │
+        └──────────────┬────────────┘
+                       │ lease (SKIP LOCKED)
+                       ▼
+              ┌───────────────────┐
+              │      Workers      │
+              │ (background loop) │
+              └─────────┬─────────┘
+                        │ HTTP POST (signed)
+                        ▼
+              ┌─────────────────────────────┐
+              │   Customer Endpoint (URL)   │
+              │   https://customer.com/...  │
+              └─────────────────────────────┘
+
+
 ```text
 Your App
   │  POST /events
