@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO events (id, tenant_id, event_type, payload_json, idempotency_key)\n        VALUES ($1, $2, $3, $4, $5)\n        ON CONFLICT (tenant_id, idempotency_key)\n        DO UPDATE SET tenant_id = events.tenant_id\n        RETURNING id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Jsonb",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "88ef9692bb41c78870b007dda2260260f0d1cbd41ecd4987369d290af6e74ae8"
+}
