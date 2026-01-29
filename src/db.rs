@@ -1,5 +1,5 @@
 use anyhow::Result;
-use sqlx::{PgPool, postgres::PgPoolOptions};
+use sqlx::{postgres::PgPoolOptions, PgPool};
 
 pub async fn connect(database_url: &str) -> Result<PgPool> {
     let pool = PgPoolOptions::new()
@@ -15,3 +15,14 @@ pub async fn run_migrations(pool: &PgPool) -> Result<()> {
     sqlx::migrate!("./migrations").run(pool).await?;
     Ok(())
 }
+
+// enum Gender {
+//     male(String),
+//     female(String),
+// }
+// struct nationality {
+//     name: String,
+//     lg: String,
+//     age: u16,
+//     gender: Gender,
+// }
