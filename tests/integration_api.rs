@@ -93,7 +93,11 @@ async fn send_json(
     let bytes = to_bytes(response.into_body(), 1024 * 1024)
         .await
         .expect("failed to read response body");
-    let payload = serde_json::from_slice::<Value>(&bytes).expect("response was not valid json");
+    let payload = serde_json::from_slice::<Value>(&bytes).unwrap_or_else(|_| {
+        json!({
+            "raw": String::from_utf8_lossy(&bytes).to_string()
+        })
+    });
     (status, payload)
 }
 
