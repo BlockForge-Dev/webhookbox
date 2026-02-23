@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO deliveries (id, event_id, endpoint_id, status, attempts_count, next_run_at)\n            VALUES ($1, $2, $3, 'pending', 0, now())\n            ON CONFLICT (event_id, endpoint_id) WHERE is_replay = false\n            DO NOTHING\n            RETURNING id\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "7f7addcbc98c7fa31b11ad6dca8cd97cf709e43cab3e93e70dce89e735c37a8a"
+}

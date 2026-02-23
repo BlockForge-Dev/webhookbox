@@ -1,0 +1,52 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT attempt_no, status_code, latency_ms, error_type, error_category, created_at\n        FROM attempts\n        WHERE delivery_id = $1\n        ORDER BY attempt_no ASC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "attempt_no",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 1,
+        "name": "status_code",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 2,
+        "name": "latency_ms",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 3,
+        "name": "error_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "error_category",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      true,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "246a7f3775e2f0601478640a3fec2634f8620d8603002faee88f04832894109b"
+}

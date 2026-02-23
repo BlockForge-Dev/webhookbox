@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE endpoint_health\n            SET quarantined_until = $2,\n                updated_at = now()\n            WHERE endpoint_id = $1\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "029cf366cdfe46d465064e8032ac6b0f7f62246637fed2b7b2132e554d4471f7"
+}

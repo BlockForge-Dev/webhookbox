@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT decision, reason_code, details_json, created_at\n        FROM policy_decisions\n        WHERE delivery_id = $1\n        ORDER BY created_at ASC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "decision",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "reason_code",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "details_json",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 3,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "237166de5936ab2bad9d9aae10433ca4f2bb33d4578fd0f62387c157039c1b57"
+}

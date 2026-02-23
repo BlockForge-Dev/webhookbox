@@ -1,0 +1,76 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n          d.id as \"delivery_id!\",\n          d.event_id as \"event_id!\",\n          d.endpoint_id as \"endpoint_id!\",\n          d.attempts_count as \"attempts_count!\",\n          d.target_url as \"delivery_target_url\",\n          e.url as \"endpoint_url!\",\n          e.enabled as \"endpoint_enabled!\",\n          e.secret as \"endpoint_secret!\",\n          ev.payload_json as \"event_payload!\",\n          ev.tenant_id as \"tenant_id!\"\n        FROM deliveries d\n        JOIN endpoints e ON e.id = d.endpoint_id\n        JOIN events ev ON ev.id = d.event_id\n        WHERE d.id = $1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "delivery_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "event_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "endpoint_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "attempts_count!",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 4,
+        "name": "delivery_target_url",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "endpoint_url!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "endpoint_enabled!",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 7,
+        "name": "endpoint_secret!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
+        "name": "event_payload!",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 9,
+        "name": "tenant_id!",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "07d67bb64ef0cae828a282cc7c23f836e9c09a69c8fd67368b07f9d2e73557e5"
+}

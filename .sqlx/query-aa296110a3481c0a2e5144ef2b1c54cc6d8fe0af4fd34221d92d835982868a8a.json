@@ -1,0 +1,52 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n          d.id as \"delivery_id!\",\n          e.url as \"endpoint_url!\",\n          d.target_url as \"delivery_target_url\",\n          e.secret as \"endpoint_secret!\",\n          ev.id as \"event_id!\",\n          ev.payload_json as \"event_payload!\"\n        FROM deliveries d\n        JOIN endpoints e ON e.id = d.endpoint_id\n        JOIN events ev ON ev.id = d.event_id\n        WHERE d.id = $1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "delivery_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "endpoint_url!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "delivery_target_url",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "endpoint_secret!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "event_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 5,
+        "name": "event_payload!",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "aa296110a3481c0a2e5144ef2b1c54cc6d8fe0af4fd34221d92d835982868a8a"
+}

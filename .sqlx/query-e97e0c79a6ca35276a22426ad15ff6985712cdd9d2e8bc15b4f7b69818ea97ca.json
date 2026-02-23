@@ -1,0 +1,70 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT d.id, d.event_id, d.endpoint_id, d.status::text as status,\n               d.attempts_count, d.next_run_at, d.created_at,\n               e.url as endpoint_url, e.enabled as endpoint_enabled\n        FROM deliveries d\n        JOIN endpoints e ON e.id = d.endpoint_id\n        WHERE d.event_id = $1\n        ORDER BY d.created_at ASC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "event_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "endpoint_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "status",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "attempts_count",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 5,
+        "name": "next_run_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 6,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 7,
+        "name": "endpoint_url",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
+        "name": "endpoint_enabled",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      null,
+      false,
+      true,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "e97e0c79a6ca35276a22426ad15ff6985712cdd9d2e8bc15b4f7b69818ea97ca"
+}

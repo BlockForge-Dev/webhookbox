@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE deliveries\n            SET status = 'retrying'::delivery_status,\n                next_run_at = now() + interval '5 seconds'\n            WHERE id = $1\n              AND status IN ('pending'::delivery_status, 'retrying'::delivery_status, 'sending'::delivery_status)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "db282449ae17bacfd3d4bbf871c6c71e381e5cca0caa6df80c3754ffacb8efdf"
+}

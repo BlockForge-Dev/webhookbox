@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO attempts\n          (id, delivery_id, attempt_no, status_code, latency_ms, error_type, error_category)\n        VALUES\n          ($1, $2, $3, $4, $5, $6, $7)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Int4",
+        "Int4",
+        "Int4",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "49b2b2c522c78258d6892016c64639ee00e214f8518622603121bcf983e5b662"
+}

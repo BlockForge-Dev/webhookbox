@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT COUNT(*)::bigint as \"count!\"\n        FROM deliveries d\n        JOIN events ev ON ev.id = d.event_id\n        WHERE ev.tenant_id = $1\n          AND d.status IN ('sending'::delivery_status)\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "cdbb37c44913cef4fe7bcc36d022a636ef981704e20304750d83368df30d84ab"
+}

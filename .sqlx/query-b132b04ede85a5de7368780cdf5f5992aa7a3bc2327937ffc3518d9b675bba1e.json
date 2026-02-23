@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO tenant_policies (tenant_id, max_in_flight, max_payload_bytes)\n        VALUES ($1, $2, $3)\n        ON CONFLICT (tenant_id) DO NOTHING\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b132b04ede85a5de7368780cdf5f5992aa7a3bc2327937ffc3518d9b675bba1e"
+}

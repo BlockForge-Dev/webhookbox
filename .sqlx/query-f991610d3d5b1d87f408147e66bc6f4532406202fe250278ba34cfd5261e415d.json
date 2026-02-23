@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                    INSERT INTO jobs (id, job_type, payload_json, run_at, status)\n                    VALUES ($1, 'deliver_webhook', $2, $3, 'queued')\n                    ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Jsonb",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f991610d3d5b1d87f408147e66bc6f4532406202fe250278ba34cfd5261e415d"
+}

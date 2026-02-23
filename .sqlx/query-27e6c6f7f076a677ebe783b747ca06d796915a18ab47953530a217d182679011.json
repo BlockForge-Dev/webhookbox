@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO policy_decisions\n              (id, tenant_id, delivery_id, job_id, decision, reason, details, reason_code, details_json, created_at)\n            VALUES\n              ($1, $2, $3, $4,\n               'deny_reschedule', 'max_in_flight_exceeded', '{}'::jsonb,\n               'MAX_IN_FLIGHT_EXCEEDED',\n               jsonb_build_object('in_flight', to_jsonb($5::bigint), 'max_in_flight', to_jsonb($6::int)),\n               now())\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Int8",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "27e6c6f7f076a677ebe783b747ca06d796915a18ab47953530a217d182679011"
+}
