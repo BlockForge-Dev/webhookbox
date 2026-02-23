@@ -1,12 +1,13 @@
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     routing::get,
     Json, Router,
 };
 use serde_json::json;
 use uuid::Uuid;
 
+use super::auth;
 use crate::state::AppState;
 
 pub fn routes() -> Router<AppState> {
@@ -15,8 +16,35 @@ pub fn routes() -> Router<AppState> {
 
 async fn list_deliveries_for_event(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(event_id): Path<Uuid>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    let tenant_id =
+        match sqlx::query_scalar::<_, Uuid>("SELECT tenant_id FROM events WHERE id = $1")
+            .bind(event_id)
+            .fetch_optional(&state.pool)
+            .await
+        {
+            Ok(Some(v)) => v,
+            Ok(None) => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({ "ok": false, "error": "event not found" })),
+                );
+            }
+            Err(e) => {
+                tracing::error!(error=%e, event_id=%event_id, "failed to load event tenant");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "ok": false, "error": "failed to fetch deliveries" })),
+                );
+            }
+        };
+
+    if let Err(rejection) = auth::authorize_tenant(&state, &headers, tenant_id).await {
+        return rejection;
+    }
+
     let rows = match sqlx::query!(
         r#"
         SELECT d.id, d.event_id, d.endpoint_id, d.status::text as status,
@@ -34,10 +62,11 @@ async fn list_deliveries_for_event(
     {
         Ok(r) => r,
         Err(e) => {
+            tracing::error!(error=%e, event_id=%event_id, "failed to fetch deliveries");
             return (
                 StatusCode::BAD_REQUEST,
-                Json(json!({ "error": "failed to fetch deliveries", "details": e.to_string() })),
-            )
+                Json(json!({ "ok": false, "error": "failed to fetch deliveries" })),
+            );
         }
     };
 

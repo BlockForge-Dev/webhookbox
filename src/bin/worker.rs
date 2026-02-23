@@ -1,18 +1,35 @@
 use anyhow::{anyhow, Result};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
 use webhookbox::queue::Job;
-use webhookbox::{config, db, queue};
+use webhookbox::{config, crypto, db, queue};
 
 type HmacSha256 = Hmac<Sha256>;
 
 enum JobOutcome {
     Done,
     Rescheduled,
+}
+
+struct PolicyDecision<'a> {
+    decision: &'a str,
+    reason: &'a str,
+    reason_code: &'a str,
+    details_json: serde_json::Value,
+}
+
+struct AttemptRecord<'a> {
+    attempt_id: Uuid,
+    delivery_id: Uuid,
+    attempt_no: i32,
+    status_code: Option<i32>,
+    latency_ms: Option<i32>,
+    error_type: Option<&'a str>,
+    error_category: Option<&'a str>,
 }
 
 // -------------------- Explainability v2: error categories --------------------
@@ -115,6 +132,22 @@ async fn main() -> Result<()> {
     let cfg = config::Config::from_env()?;
     let pool = db::connect(&cfg.database_url).await?;
     db::run_migrations(&pool).await?;
+    let secret_cipher = cfg
+        .secrets_key
+        .as_deref()
+        .map(crypto::SecretCipher::from_passphrase)
+        .transpose()?;
+    if secret_cipher.is_none() {
+        tracing::warn!("SECRETS_KEY is not set; encrypted endpoint secrets cannot be used");
+    }
+
+    let http = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(15))
+        .pool_idle_timeout(Duration::from_secs(90))
+        .pool_max_idle_per_host(16)
+        .user_agent("webhookbox-worker/0.1")
+        .build()?;
 
     let worker_id = format!("worker-{}", Uuid::new_v4());
     tracing::info!(%worker_id, "worker started");
@@ -133,7 +166,9 @@ async fn main() -> Result<()> {
                 );
 
                 let res: Result<JobOutcome> = match job.job_type.as_str() {
-                    "deliver_webhook" => handle_deliver_webhook(&pool, &job).await,
+                    "deliver_webhook" => {
+                        handle_deliver_webhook(&pool, &http, secret_cipher.as_ref(), &job).await
+                    }
                     other => {
                         tracing::warn!(job_id=%job.id, job_type=%other, "unknown job type, marking done");
                         Ok(JobOutcome::Done)
@@ -162,7 +197,12 @@ async fn main() -> Result<()> {
 
 // -------------------- Deliver webhook job --------------------
 
-async fn handle_deliver_webhook(pool: &sqlx::PgPool, job: &Job) -> Result<JobOutcome> {
+async fn handle_deliver_webhook(
+    pool: &sqlx::PgPool,
+    http: &reqwest::Client,
+    secret_cipher: Option<&crypto::SecretCipher>,
+    job: &Job,
+) -> Result<JobOutcome> {
     const MAX_ATTEMPTS: i32 = 8;
     const BASE_DELAY_SECS: i64 = 10;
     const CAP_DELAY_SECS: i64 = 15 * 60;
@@ -174,6 +214,17 @@ async fn handle_deliver_webhook(pool: &sqlx::PgPool, job: &Job) -> Result<JobOut
         .ok_or_else(|| anyhow!("missing delivery_id in job payload"))?;
     let delivery_id = Uuid::parse_str(delivery_id)?;
 
+    // optional replay override
+    let override_url = job
+        .payload_json
+        .get("override_url")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    // If override_url is set, treat this as "test replay mode"
+    // => do NOT quarantine the real endpoint and do NOT update endpoint_health.
+    let is_test_replay = override_url.is_some();
+
     let row = sqlx::query!(
         r#"
         SELECT
@@ -181,6 +232,7 @@ async fn handle_deliver_webhook(pool: &sqlx::PgPool, job: &Job) -> Result<JobOut
           d.event_id as "event_id!",
           d.endpoint_id as "endpoint_id!",
           d.attempts_count as "attempts_count!",
+          d.target_url as "delivery_target_url",
           e.url as "endpoint_url!",
           e.enabled as "endpoint_enabled!",
           e.secret as "endpoint_secret!",
@@ -196,42 +248,57 @@ async fn handle_deliver_webhook(pool: &sqlx::PgPool, job: &Job) -> Result<JobOut
     .fetch_one(pool)
     .await?;
 
+    // decide final URL:
+    // 1) override_url (test replay)
+    // 2) deliveries.target_url (audit replay stored in DB)
+    // 3) endpoints.url (normal)
+    let target_url = override_url
+        .as_deref()
+        .or(row.delivery_target_url.as_deref())
+        .unwrap_or(&row.endpoint_url);
+
     // 0) Quarantine check BEFORE max_in_flight reserves a slot
-    if let Some(until) = endpoint_quarantine_until(pool, row.endpoint_id).await? {
-        log_policy(
-            pool,
-            row.tenant_id,
-            row.delivery_id,
-            Some(job.id),
-            "deny_reschedule",
-            "endpoint_quarantined",
-            "ENDPOINT_QUARANTINED",
-            serde_json::json!({ "until": until }),
-        )
-        .await?;
+    // Skip quarantine checks for test replay mode.
+    if !is_test_replay {
+        if let Some(until) = endpoint_quarantine_until(pool, row.endpoint_id).await? {
+            log_policy(
+                pool,
+                row.tenant_id,
+                row.delivery_id,
+                Some(job.id),
+                PolicyDecision {
+                    decision: "deny_reschedule",
+                    reason: "endpoint_quarantined",
+                    reason_code: "ENDPOINT_QUARANTINED",
+                    details_json: serde_json::json!({ "until": until }),
+                },
+            )
+            .await?;
 
-        // reschedule this job for after quarantine
-        reschedule_job(pool, job.id, until).await?;
+            // reschedule this job for after quarantine
+            reschedule_job(pool, job.id, until).await?;
 
-        // keep delivery as retrying so timeline shows “blocked then scheduled”
-        sqlx::query!(
-            r#"
-            UPDATE deliveries
-            SET status = 'retrying'::delivery_status,
-                next_run_at = $2
-            WHERE id = $1
-              AND status IN ('pending'::delivery_status, 'retrying'::delivery_status, 'sending'::delivery_status)
-            "#,
-            row.delivery_id,
-            until
-        )
-        .execute(pool)
-        .await?;
+            // keep delivery as retrying so timeline shows “blocked then scheduled”
+            sqlx::query!(
+                r#"
+                UPDATE deliveries
+                SET status = 'retrying'::delivery_status,
+                    next_run_at = $2
+                WHERE id = $1
+                  AND status IN ('pending'::delivery_status, 'retrying'::delivery_status, 'sending'::delivery_status)
+                "#,
+                row.delivery_id,
+                until
+            )
+            .execute(pool)
+            .await?;
 
-        return Ok(JobOutcome::Rescheduled);
+            return Ok(JobOutcome::Rescheduled);
+        }
     }
 
     // 1) Tenant max_in_flight policy (this also logs policy_decisions)
+    // (still applies to test replay, because it's a tenant-level safety)
     let permit = enforce_max_in_flight(pool, row.tenant_id, row.delivery_id, job.id).await?;
     if matches!(permit, PermitResult::Rescheduled) {
         return Ok(JobOutcome::Rescheduled);
@@ -242,17 +309,19 @@ async fn handle_deliver_webhook(pool: &sqlx::PgPool, job: &Job) -> Result<JobOut
     let attempt_id = Uuid::new_v4();
     let ts = chrono::Utc::now().timestamp();
 
-    // disabled endpoint => permanent fail (treat as non-retryable)
+    // disabled endpoint => permanent fail (non-retryable)
     if !row.endpoint_enabled {
         record_attempt(
             pool,
-            attempt_id,
-            row.delivery_id,
-            attempt_no,
-            None,
-            None,
-            Some("endpoint_disabled"),
-            Some("HTTP_4XX"),
+            AttemptRecord {
+                attempt_id,
+                delivery_id: row.delivery_id,
+                attempt_no,
+                status_code: None,
+                latency_ms: None,
+                error_type: Some("endpoint_disabled"),
+                error_category: Some("HTTP_4XX"),
+            },
         )
         .await?;
 
@@ -264,22 +333,34 @@ async fn handle_deliver_webhook(pool: &sqlx::PgPool, job: &Job) -> Result<JobOut
         )
         .await?;
 
-        note_endpoint_failure(pool, row.endpoint_id, Some("HTTP_4XX"), false).await?;
+        if !is_test_replay {
+            note_endpoint_failure(pool, row.endpoint_id, Some("HTTP_4XX"), false).await?;
+        }
+
         return Ok(JobOutcome::Done);
     }
 
     // missing secret => permanent fail (misconfig)
-    let secret = row.endpoint_secret.trim();
+    let resolved_secret = if crypto::is_encrypted_secret(&row.endpoint_secret) {
+        let cipher = secret_cipher
+            .ok_or_else(|| anyhow!("SECRETS_KEY missing but endpoint secret is encrypted"))?;
+        cipher.decrypt(&row.endpoint_secret)?
+    } else {
+        row.endpoint_secret.clone()
+    };
+    let secret = resolved_secret.trim();
     if secret.is_empty() {
         record_attempt(
             pool,
-            attempt_id,
-            row.delivery_id,
-            attempt_no,
-            None,
-            None,
-            Some("missing_endpoint_secret"),
-            Some("HTTP_4XX"),
+            AttemptRecord {
+                attempt_id,
+                delivery_id: row.delivery_id,
+                attempt_no,
+                status_code: None,
+                latency_ms: None,
+                error_type: Some("missing_endpoint_secret"),
+                error_category: Some("HTTP_4XX"),
+            },
         )
         .await?;
 
@@ -291,7 +372,10 @@ async fn handle_deliver_webhook(pool: &sqlx::PgPool, job: &Job) -> Result<JobOut
         )
         .await?;
 
-        note_endpoint_failure(pool, row.endpoint_id, Some("HTTP_4XX"), false).await?;
+        if !is_test_replay {
+            note_endpoint_failure(pool, row.endpoint_id, Some("HTTP_4XX"), false).await?;
+        }
+
         return Ok(JobOutcome::Done);
     }
 
@@ -301,7 +385,7 @@ async fn handle_deliver_webhook(pool: &sqlx::PgPool, job: &Job) -> Result<JobOut
 
     // signature
     let v1 = sign_v1(
-        &row.endpoint_secret,
+        secret,
         ts,
         row.delivery_id,
         attempt_id,
@@ -314,14 +398,15 @@ async fn handle_deliver_webhook(pool: &sqlx::PgPool, job: &Job) -> Result<JobOut
         delivery_id=%row.delivery_id,
         attempt_id=%attempt_id,
         ts=%ts,
-        endpoint=%row.endpoint_url,
+        endpoint=%target_url,
+        test_replay=%is_test_replay,
         "sending webhook (signed)"
     );
 
     // send
     let start = Instant::now();
-    let resp = reqwest::Client::new()
-        .post(&row.endpoint_url)
+    let resp = http
+        .post(target_url)
         .header("Content-Type", "application/json")
         .header("X-Event-Id", row.event_id.to_string())
         .header("X-Delivery-Id", row.delivery_id.to_string())
@@ -371,22 +456,26 @@ async fn handle_deliver_webhook(pool: &sqlx::PgPool, job: &Job) -> Result<JobOut
     // record attempt (includes error_category)
     record_attempt(
         pool,
-        attempt_id,
-        row.delivery_id,
-        attempt_no,
-        status_code,
-        Some(latency_ms),
-        error_type,
-        error_category,
+        AttemptRecord {
+            attempt_id,
+            delivery_id: row.delivery_id,
+            attempt_no,
+            status_code,
+            latency_ms: Some(latency_ms),
+            error_type,
+            error_category,
+        },
     )
     .await?;
 
-    // update endpoint health
+    // update endpoint health (skip in test replay mode)
     let success = matches!(status_code, Some(code) if (200..=299).contains(&code));
-    if success {
-        note_endpoint_success(pool, row.endpoint_id).await?;
-    } else {
-        note_endpoint_failure(pool, row.endpoint_id, error_category, should_retry).await?;
+    if !is_test_replay {
+        if success {
+            note_endpoint_success(pool, row.endpoint_id).await?;
+        } else {
+            note_endpoint_failure(pool, row.endpoint_id, error_category, should_retry).await?;
+        }
     }
 
     // success
@@ -406,51 +495,60 @@ async fn handle_deliver_webhook(pool: &sqlx::PgPool, job: &Job) -> Result<JobOut
         return Ok(JobOutcome::Done);
     }
 
-    // retry
+    // retry path
     if should_retry && attempt_no < MAX_ATTEMPTS {
         // if endpoint got quarantined (threshold reached), schedule at quarantine time
-        if let Some(until) = endpoint_quarantine_until(pool, row.endpoint_id).await? {
-            log_policy(
-                pool,
-                row.tenant_id,
-                row.delivery_id,
-                Some(job.id),
-                "deny_reschedule",
-                "endpoint_quarantined",
-                "ENDPOINT_QUARANTINED",
-                serde_json::json!({ "until": until, "after_attempt": attempt_no, "last_error_category": error_category }),
-            )
-            .await?;
+        if !is_test_replay {
+            if let Some(until) = endpoint_quarantine_until(pool, row.endpoint_id).await? {
+                log_policy(
+                    pool,
+                    row.tenant_id,
+                    row.delivery_id,
+                    Some(job.id),
+                    PolicyDecision {
+                        decision: "deny_reschedule",
+                        reason: "endpoint_quarantined",
+                        reason_code: "ENDPOINT_QUARANTINED",
+                        details_json: serde_json::json!({
+                            "until": until,
+                            "after_attempt": attempt_no,
+                            "last_error_category": error_category
+                        }),
+                    },
+                )
+                .await?;
 
-            sqlx::query!(
-                r#"
-                UPDATE deliveries
-                SET status = 'retrying'::delivery_status,
-                    attempts_count = attempts_count + 1,
-                    next_run_at = $2
-                WHERE id = $1
-                "#,
-                row.delivery_id,
-                until
-            )
-            .execute(pool)
-            .await?;
+                sqlx::query!(
+                    r#"
+                    UPDATE deliveries
+                    SET status = 'retrying'::delivery_status,
+                        attempts_count = attempts_count + 1,
+                        next_run_at = $2
+                    WHERE id = $1
+                    "#,
+                    row.delivery_id,
+                    until
+                )
+                .execute(pool)
+                .await?;
 
-            sqlx::query!(
-                r#"
-                INSERT INTO jobs (id, job_type, payload_json, run_at, status)
-                VALUES ($1, 'deliver_webhook', $2, $3, 'queued')
-                "#,
-                Uuid::new_v4(),
-                serde_json::json!({ "delivery_id": row.delivery_id }),
-                until
-            )
-            .execute(pool)
-            .await?;
+                sqlx::query!(
+                    r#"
+                    INSERT INTO jobs (id, job_type, payload_json, run_at, status)
+                    VALUES ($1, 'deliver_webhook', $2, $3, 'queued')
+                    "#,
+                    Uuid::new_v4(),
+                    serde_json::json!({ "delivery_id": row.delivery_id }),
+                    until
+                )
+                .execute(pool)
+                .await?;
 
-            return Ok(JobOutcome::Done);
+                return Ok(JobOutcome::Done);
+            }
         }
 
+        // normal backoff
         let delay = compute_backoff_with_jitter(
             row.delivery_id,
             attempt_no,
@@ -473,13 +571,19 @@ async fn handle_deliver_webhook(pool: &sqlx::PgPool, job: &Job) -> Result<JobOut
         .execute(pool)
         .await?;
 
+        // preserve override_url for test replay retries (if any)
+        let mut payload = serde_json::json!({ "delivery_id": row.delivery_id });
+        if let Some(u) = override_url.as_deref() {
+            payload["override_url"] = serde_json::Value::String(u.to_string());
+        }
+
         sqlx::query!(
             r#"
             INSERT INTO jobs (id, job_type, payload_json, run_at, status)
             VALUES ($1, 'deliver_webhook', $2, $3, 'queued')
             "#,
             Uuid::new_v4(),
-            serde_json::json!({ "delivery_id": row.delivery_id }),
+            payload,
             next_time
         )
         .execute(pool)
@@ -488,7 +592,7 @@ async fn handle_deliver_webhook(pool: &sqlx::PgPool, job: &Job) -> Result<JobOut
         return Ok(JobOutcome::Done);
     }
 
-    // -------------------- DLQ (reason is now specific + actionable) --------------------
+    // -------------------- DLQ (specific + actionable) --------------------
     sqlx::query!(
         r#"
         UPDATE deliveries
@@ -505,7 +609,7 @@ async fn handle_deliver_webhook(pool: &sqlx::PgPool, job: &Job) -> Result<JobOut
     let dlq_reason = if attempt_no >= MAX_ATTEMPTS {
         dlq_reason_max_attempts(MAX_ATTEMPTS, error_category, status_code)
     } else {
-        // non-retryable: e.g. HTTP 401, HTTP 404, etc.
+        // non-retryable (most commonly HTTP_4XX like 401/403/404)
         dlq_reason_non_retryable(
             status_code,
             error_category,
@@ -555,7 +659,7 @@ fn sign_v1(
     hex::encode(mac.finalize().into_bytes())
 }
 
-// -------------------- DLQ reason helpers (this is the main “fix”) --------------------
+// -------------------- DLQ reason helpers --------------------
 
 fn dlq_reason_non_retryable(
     status_code: Option<i32>,
@@ -592,10 +696,7 @@ async fn log_policy(
     tenant_id: Uuid,
     delivery_id: Uuid,
     job_id: Option<Uuid>,
-    decision: &str,
-    reason: &str,
-    reason_code: &str,
-    details_json: serde_json::Value,
+    decision: PolicyDecision<'_>,
 ) -> Result<()> {
     sqlx::query!(
         r#"
@@ -608,10 +709,10 @@ async fn log_policy(
         tenant_id,
         delivery_id,
         job_id,
-        decision,
-        reason,
-        reason_code,
-        details_json
+        decision.decision,
+        decision.reason,
+        decision.reason_code,
+        decision.details_json
     )
     .execute(pool)
     .await?;
@@ -684,13 +785,14 @@ async fn enforce_max_in_flight(
         10
     };
 
+    // IMPORTANT: only count "sending" as in-flight
     let in_flight: i64 = sqlx::query_scalar!(
         r#"
         SELECT COUNT(*)::bigint as "count!"
         FROM deliveries d
         JOIN events ev ON ev.id = d.event_id
         WHERE ev.tenant_id = $1
-          AND d.status IN ('sending'::delivery_status, 'retrying'::delivery_status)
+          AND d.status IN ('sending'::delivery_status)
         "#,
         tenant_id
     )
@@ -698,7 +800,6 @@ async fn enforce_max_in_flight(
     .await?;
 
     if in_flight >= max_in_flight as i64 {
-        // ✅ correct: deny_reschedule
         sqlx::query!(
             r#"
             INSERT INTO policy_decisions
@@ -787,16 +888,7 @@ async fn enforce_max_in_flight(
 
 // -------------------- Attempts --------------------
 
-async fn record_attempt(
-    pool: &sqlx::PgPool,
-    attempt_id: Uuid,
-    delivery_id: Uuid,
-    attempt_no: i32,
-    status_code: Option<i32>,
-    latency_ms: Option<i32>,
-    error_type: Option<&str>,
-    error_category: Option<&str>,
-) -> Result<()> {
+async fn record_attempt(pool: &sqlx::PgPool, attempt: AttemptRecord<'_>) -> Result<()> {
     sqlx::query!(
         r#"
         INSERT INTO attempts
@@ -804,13 +896,13 @@ async fn record_attempt(
         VALUES
           ($1, $2, $3, $4, $5, $6, $7)
         "#,
-        attempt_id,
-        delivery_id,
-        attempt_no,
-        status_code,
-        latency_ms,
-        error_type,
-        error_category
+        attempt.attempt_id,
+        attempt.delivery_id,
+        attempt.attempt_no,
+        attempt.status_code,
+        attempt.latency_ms,
+        attempt.error_type,
+        attempt.error_category
     )
     .execute(pool)
     .await?;
@@ -818,8 +910,6 @@ async fn record_attempt(
 }
 
 // -------------------- Endpoint health / quarantine --------------------
-// (Requires endpoint_health table with: endpoint_id (pk), consecutive_failures int,
-//  quarantined_until timestamptz null, last_failure_category text null, updated_at timestamptz)
 
 async fn endpoint_quarantine_until(
     pool: &sqlx::PgPool,

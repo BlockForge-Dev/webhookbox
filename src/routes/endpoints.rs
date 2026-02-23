@@ -1,6 +1,6 @@
 use axum::{
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     routing::{patch, post},
     Json, Router,
 };
@@ -8,6 +8,7 @@ use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
 
+use super::auth;
 use crate::state::AppState;
 
 pub fn routes() -> Router<AppState> {
@@ -26,6 +27,7 @@ struct CreateEndpointRequest {
 
 async fn create_endpoint(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<CreateEndpointRequest>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     if req.url.trim().is_empty() {
@@ -40,9 +42,29 @@ async fn create_endpoint(
             Json(json!({ "error": "secret is required" })),
         );
     }
+    if let Err(rejection) = auth::authorize_tenant(&state, &headers, req.tenant_id).await {
+        return rejection;
+    }
 
     let id = Uuid::new_v4();
     let enabled = req.enabled.unwrap_or(true);
+    let Some(cipher) = state.secret_cipher.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "ok": false, "error": "server_secrets_not_configured" })),
+        );
+    };
+
+    let encrypted_secret = match cipher.encrypt(req.secret.trim()) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!(error=%e, "failed to encrypt endpoint secret");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "ok": false, "error": "failed to create endpoint" })),
+            );
+        }
+    };
 
     let res = sqlx::query!(
         r#"
@@ -53,7 +75,7 @@ async fn create_endpoint(
         id,
         req.tenant_id,
         req.url,
-        req.secret,
+        encrypted_secret,
         enabled
     )
     .fetch_one(&state.pool)
@@ -73,10 +95,13 @@ async fn create_endpoint(
                 }
             })),
         ),
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "failed to create endpoint", "details": e.to_string() })),
-        ),
+        Err(e) => {
+            tracing::error!(error=%e, endpoint_id=%id, "failed to create endpoint");
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "ok": false, "error": "failed to create endpoint" })),
+            )
+        }
     }
 }
 
@@ -87,8 +112,13 @@ struct ListEndpointsQuery {
 
 async fn list_endpoints(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(q): Query<ListEndpointsQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    if let Err(rejection) = auth::authorize_tenant(&state, &headers, q.tenant_id).await {
+        return rejection;
+    }
+
     let res = sqlx::query!(
         r#"
         SELECT id, tenant_id, url, enabled, created_at
@@ -115,10 +145,13 @@ async fn list_endpoints(
                 })).collect::<Vec<_>>()
             })),
         ),
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "failed to list endpoints", "details": e.to_string() })),
-        ),
+        Err(e) => {
+            tracing::error!(error=%e, tenant_id=%q.tenant_id, "failed to list endpoints");
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "ok": false, "error": "failed to list endpoints" })),
+            )
+        }
     }
 }
 
@@ -129,9 +162,36 @@ struct UpdateEndpointRequest {
 
 async fn update_endpoint(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(id): Path<Uuid>,
     Json(req): Json<UpdateEndpointRequest>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    let tenant_id =
+        match sqlx::query_scalar::<_, Uuid>("SELECT tenant_id FROM endpoints WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&state.pool)
+            .await
+        {
+            Ok(Some(v)) => v,
+            Ok(None) => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({ "error": "endpoint not found" })),
+                );
+            }
+            Err(e) => {
+                tracing::error!(error=%e, endpoint_id=%id, "failed to load endpoint tenant");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "ok": false, "error": "failed to update endpoint" })),
+                );
+            }
+        };
+
+    if let Err(rejection) = auth::authorize_tenant(&state, &headers, tenant_id).await {
+        return rejection;
+    }
+
     let res = sqlx::query!(
         r#"
         UPDATE endpoints
@@ -163,9 +223,12 @@ async fn update_endpoint(
             StatusCode::NOT_FOUND,
             Json(json!({ "error": "endpoint not found" })),
         ),
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "failed to update endpoint", "details": e.to_string() })),
-        ),
+        Err(e) => {
+            tracing::error!(error=%e, endpoint_id=%id, "failed to update endpoint");
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "ok": false, "error": "failed to update endpoint" })),
+            )
+        }
     }
 }

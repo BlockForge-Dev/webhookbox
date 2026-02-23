@@ -5,6 +5,8 @@ pub struct Config {
     pub database_url: String,
     pub host: String,
     pub port: u16,
+    pub api_key: Option<String>,
+    pub secrets_key: Option<String>,
 }
 
 impl Config {
@@ -19,10 +21,22 @@ impl Config {
             .parse()
             .map_err(|e| anyhow!("PORT must be a valid u16: {e}"))?;
 
+        let api_key = std::env::var("API_KEY")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty());
+
+        let secrets_key = std::env::var("SECRETS_KEY")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty());
+
         Ok(Self {
             database_url,
             host,
             port,
+            api_key,
+            secrets_key,
         })
     }
 

@@ -9,11 +9,26 @@ on:
 env:
   CARGO_TERM_COLOR: always
   SQLX_OFFLINE: "true"
+  TEST_DATABASE_URL: postgres://webhookbox:webhookbox@localhost:5432/webhookbox
 
 
 jobs:
   build-test-lint:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: webhookbox
+          POSTGRES_PASSWORD: webhookbox
+          POSTGRES_DB: webhookbox
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U webhookbox -d webhookbox"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
 
     steps:
       - name: Checkout

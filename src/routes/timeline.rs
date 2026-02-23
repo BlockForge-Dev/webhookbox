@@ -1,12 +1,13 @@
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     Json,
 };
 use serde::Serialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
+use super::auth;
 use crate::state::AppState;
 
 #[derive(Serialize)]
@@ -88,8 +89,41 @@ struct DlqInfo {
 
 pub async fn get_timeline(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(delivery_id): Path<Uuid>,
 ) -> (StatusCode, Json<Value>) {
+    let tenant_id = match sqlx::query_scalar::<_, Uuid>(
+        r#"
+        SELECT ev.tenant_id
+        FROM deliveries d
+        JOIN events ev ON ev.id = d.event_id
+        WHERE d.id = $1
+        "#,
+    )
+    .bind(delivery_id)
+    .fetch_optional(&state.pool)
+    .await
+    {
+        Ok(Some(v)) => v,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "ok": false, "error": "delivery not found" })),
+            );
+        }
+        Err(e) => {
+            tracing::error!(error=%e, delivery_id=%delivery_id, "failed to load delivery tenant");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "ok": false, "error": "failed to load timeline" })),
+            );
+        }
+    };
+
+    if let Err(rejection) = auth::authorize_tenant(&state, &headers, tenant_id).await {
+        return rejection;
+    }
+
     // 1) delivery + endpoint + event
     let d = match sqlx::query!(
         r#"
@@ -139,12 +173,11 @@ pub async fn get_timeline(
     {
         Ok(rows) => rows,
         Err(e) => {
+            tracing::error!(error=%e, delivery_id=%delivery_id, "failed to load attempts");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(
-                    json!({ "ok": false, "error": "failed to load attempts", "details": e.to_string() }),
-                ),
-            )
+                Json(json!({ "ok": false, "error": "failed to load attempts" })),
+            );
         }
     };
 
@@ -191,12 +224,11 @@ pub async fn get_timeline(
     {
         Ok(rows) => rows,
         Err(e) => {
+            tracing::error!(error=%e, delivery_id=%delivery_id, "failed to load policy decisions");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(
-                    json!({ "ok": false, "error": "failed to load policy decisions", "details": e.to_string() }),
-                ),
-            )
+                Json(json!({ "ok": false, "error": "failed to load policy decisions" })),
+            );
         }
     };
 

@@ -1,154 +1,24 @@
-![CI](../../actions/workflows/ci.yml/badge.svg)
-
-
-
 # WebhookBox
 
-**WebhookBox** is a Postgres-first, self-hosted webhook delivery system focused on two things:
+WebhookBox is a Postgres-first webhook delivery service built in Rust.
 
-1) **Never lose events** (durable storage + replayable history)  
-2) **Make failures obvious** (clear delivery state + attempts timeline as the project evolves)
+It gives you:
+- Durable event ingest with idempotency
+- Fan-out deliveries to tenant endpoints
+- Worker retries, backoff, and DLQ
+- Delivery explainability (timeline + replay + curl)
+- Tenant-scoped API keys for data-plane access
+- Basic Prometheus-style metrics
 
-This repo is being built in public, milestone-by-milestone.
+## Stack
 
+- Rust
+- Axum
+- SQLx + Postgres
+- Tokio
+- Tracing
 
-## Why this exists
-
-If you send webhooks directly from your app, you eventually hit:
-
-- retries that happen in the wrong place
-- duplicate deliveries when your app retries
-- lost events when a process crashes mid-send
-- “it failed” with no visibility into *why*
-- noisy retry storms that overload systems (later: tenant safety)
-
-WebhookBox solves this by making Postgres the **source of truth**:
-- API writes rows
-- workers read rows + write results
-- UI/debug tools read rows and explain what happened
-
-
-## Current Status (Milestone 0–1)
-
-✅ **Service boot + DB wiring**
-- Axum server + env-based config
-- Postgres connection pool (SQLx)
-- SQL migrations (`sqlx migrate run`)
-- `/health` endpoint checks DB readiness
-
-✅ **Event ingestion + audit log**
-- `POST /events` stores events durably in Postgres
-- **Idempotency** enforced by a unique constraint: `(tenant_id, idempotency_key)`
-  - safe retries from your app without duplicate events
-
-
-
-## Roadmap (high level)
-
-- [ ] Tenants API (`POST /tenants`)
-- [ ] Endpoints (register customer URLs + secrets)
-- [ ] Deliveries (fan-out per endpoint)
-- [ ] Postgres queue (jobs, leasing, scheduling, DLQ)
-- [ ] Workers (deliver webhooks, retries + backoff)
-- [ ] Attempts + error classification (DNS/TLS/timeout/429/5xx)
-- [ ] Explainability (timeline, replay, “copy as curl”)
-- [ ] Tenant safety (caps, rate limits, quarantine)
-
----
-
-## Architecture (data flow)
-
-
-
-```text
-Your App
-  │  POST /events
-  ▼
-WebhookBox API (Axum)
-  │  writes events (idempotent)
-  ▼
-Postgres (source of truth)
-  ├─ tenants
-  ├─ events
-  ├─ endpoints         (next)
-  ├─ deliveries        (next)
-  ├─ attempts          (next)
-  └─ jobs / DLQ        (next)
-
-                 ┌──────────────────────────────┐
-                 │           Your App           │
-                 │ (produces events: user.created│
-                 │  invoice.paid, etc.)         │
-                 └───────────────┬──────────────┘
-                                 │  POST /events
-                                 ▼
-┌───────────────────────────────────────────────────────────┐
-│                    Webhook Box API (Axum)                 │
-│                                                           │
-│  - validates request                                      │
-│  - enforces idempotency                                  │
-│  - writes rows to Postgres                                │
-└───────────────┬───────────────────────────────┬───────────┘
-                │                               │
-                │ writes                         │ reads later
-                ▼                               ▼
-        ┌───────────────────┐           ┌────────────────────┐
-        │     Postgres       │           │  Webhook Box UI/API │
-        │  (source of truth) │           │  (timeline, replay) │
-        └───────┬───────────┘           └───────────┬────────┘
-                │                                   │
-                │ tables (core objects)             │ queries rows to
-                ▼                                   │ build “explanations”
- ┌─────────────────────────────────────────────────────────────┐
- │ tenants        endpoints         events         deliveries   │
- │  - id           - id             - id            - id         │
- │  - name         - tenant_id      - tenant_id     - event_id   │
- │  - created_at   - url            - event_type    - endpoint_id│
- │                - secret         - payload_json  - status      │
- │                - enabled        - idem_key      - next_run_at │
- │                                - created_at    - attempts_cnt│
- │                                                             │
- │ attempts                         jobs (pgqueue)              │
- │  - delivery_id                   - job_type                   │
- │  - attempt_no                    - payload_json               │
- │  - status_code                   - run_at                      │
- │  - error_type                    - locked_by/lease            │
- │  - latency_ms                    - status                      │
- │  - created_at                    - attempt                     │
- └─────────────────────────────────────────────────────────────┘
-                │
-                │ enqueue job after creating delivery rows
-                ▼
-        ┌───────────────────────────┐
-        │      Postgres Queue       │
-        │  jobs table (scheduled)   │
-        └──────────────┬────────────┘
-                       │ lease (SKIP LOCKED)
-                       ▼
-              ┌───────────────────┐
-              │      Workers      │
-              │ (background loop) │
-              └─────────┬─────────┘
-                        │ HTTP POST (signed)
-                        ▼
-              ┌─────────────────────────────┐
-              │   Customer Endpoint (URL)   │
-              │   https://customer.com/...  │
-              └─────────────────────────────┘
-
----
-
-## Tech Stack
-
-* Rust
-* Axum
-* SQLx (Postgres)
-* Tokio
-* Tracing
-
----
-
-## Getting Started (Local Dev)
+## Local Setup
 
 ### 1) Start Postgres
 
@@ -156,18 +26,21 @@ Postgres (source of truth)
 docker compose up -d
 ```
 
-### 2) Set env vars
+### 2) Configure environment
 
-Create a `.env` file in the project root:
+Create `.env` in project root:
 
 ```env
 DATABASE_URL=postgres://webhookbox:webhookbox@localhost:5432/webhookbox
 HOST=127.0.0.1
 PORT=3000
+API_KEY=change-me-admin-key
+SECRETS_KEY=change-me-secrets-key
 RUST_LOG=info
 ```
 
-> Note: `.env` is ignored by git. Don’t commit secrets.
+`API_KEY` protects admin routes.
+`SECRETS_KEY` encrypts endpoint secrets at rest.
 
 ### 3) Run migrations
 
@@ -175,89 +48,145 @@ RUST_LOG=info
 sqlx migrate run
 ```
 
-### 4) Run the service
+### 4) Run API + worker
 
 ```bash
 cargo run
 ```
 
----
-
-## API
-
-### Health Check
+In a second terminal:
 
 ```bash
-curl -i http://127.0.0.1:3000/health
+cargo run --bin worker
 ```
 
-Response:
+## Auth Model
 
-```json
-{ "ok": true, "db": "ok" }
-```
+- Admin routes (require `x-api-key`):
+  - `POST /tenants`
+  - `POST /tenants/:id/api-keys`
+  - `GET /metrics`
+- Tenant data routes (require `x-tenant-api-key`):
+  - `POST /events`
+  - `POST/GET/PATCH /endpoints`
+  - `GET /events/:id/deliveries`
+  - `GET /deliveries/:id/timeline`
+  - `GET /deliveries/:id/curl`
+  - `POST /deliveries/:id/replay`
 
----
+## Demo Flow
 
-### Create Tenant (temporary)
-
-For now you can insert a tenant directly in the DB:
-
-```sql
-INSERT INTO tenants (id, name)
-VALUES ('00000000-0000-0000-0000-000000000001', 'demo');
-```
-
----
-
-### Ingest Event
+### Create tenant
 
 ```bash
-curl -i -X POST http://127.0.0.1:3000/events \
+curl -s -X POST http://127.0.0.1:3000/tenants \
+  -H "x-api-key: change-me-admin-key" \
+  -H "content-type: application/json" \
+  -d '{"name":"demo-tenant"}'
+```
+
+Save `tenant.id` from the response.
+
+### Create tenant API key
+
+```bash
+curl -s -X POST http://127.0.0.1:3000/tenants/<TENANT_ID>/api-keys \
+  -H "x-api-key: change-me-admin-key" \
+  -H "content-type: application/json" \
+  -d '{"label":"demo"}'
+```
+
+Save `api_key.key` from the response (returned once).
+
+### Register endpoint
+
+```bash
+curl -s -X POST http://127.0.0.1:3000/endpoints \
+  -H "x-tenant-api-key: <TENANT_API_KEY>" \
   -H "content-type: application/json" \
   -d '{
-    "tenant_id":"00000000-0000-0000-0000-000000000001",
-    "event_type":"user.created",
-    "payload":{"user_id":123,"email":"a@b.com"},
-    "idempotency_key":"abc-123"
+    "tenant_id":"<TENANT_ID>",
+    "url":"https://example.com/webhook",
+    "secret":"super-secret"
   }'
 ```
 
-Response:
+### Ingest event
 
-json
-{ "event_id": "<uuid>", "ok": true }
+```bash
+curl -s -X POST http://127.0.0.1:3000/events \
+  -H "x-tenant-api-key: <TENANT_API_KEY>" \
+  -H "content-type: application/json" \
+  -d '{
+    "tenant_id":"<TENANT_ID>",
+    "event_type":"user.created",
+    "payload":{"user_id":123},
+    "idempotency_key":"demo-123"
+  }'
+```
 
+### Inspect timeline and curl
 
-#### Idempotency behavior
+```bash
+curl -s "http://127.0.0.1:3000/events/<EVENT_ID>/deliveries" \
+  -H "x-tenant-api-key: <TENANT_API_KEY>"
+```
 
-Repeat the same request with the same `tenant_id` + `idempotency_key`:
+```bash
+curl -s "http://127.0.0.1:3000/deliveries/<DELIVERY_ID>/timeline" \
+  -H "x-tenant-api-key: <TENANT_API_KEY>"
+```
 
-* it will return the **same** `event_id`
-* it will not create duplicates
+```bash
+curl -s "http://127.0.0.1:3000/deliveries/<DELIVERY_ID>/curl" \
+  -H "x-tenant-api-key: <TENANT_API_KEY>"
+```
 
+## Observability
 
+### Metrics endpoint
 
-## Contributing / Build in Public
+`GET /metrics` returns Prometheus-style text metrics (admin key required).
 
-Issues and suggestions are welcome. This project is built milestone-by-milestone with a focus on:
+```bash
+curl -s http://127.0.0.1:3000/metrics \
+  -H "x-api-key: change-me-admin-key"
+```
 
-* correctness
-* reliability
-* observability
-* explainability
+Example metrics:
+- `webhookbox_events_total`
+- `webhookbox_deliveries_status{status="retrying"}`
+- `webhookbox_jobs_status{status="queued"}`
+- `webhookbox_dead_letters_total`
 
+### Dashboard starter panels
+
+Use these as initial Prometheus/Grafana panels:
+- `webhookbox_events_total`
+- `webhookbox_deliveries_status{status="pending"}`
+- `webhookbox_deliveries_status{status="retrying"}`
+- `webhookbox_jobs_status{status="running"}`
+- `webhookbox_dead_letters_total`
+
+### Useful log filters
+
+- Failed jobs:
+  - message contains `job failed`
+- Delivery attempts:
+  - message contains `sending webhook`
+- Tenant auth failures:
+  - response error equals `invalid_tenant_api_key` or `tenant_access_denied`
+
+## Testing
+
+```bash
+cargo fmt --all --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all
+```
+
+Integration tests use `TEST_DATABASE_URL` (or `DATABASE_URL` fallback).
 
 ## License
 
 TBD
-
-```
-
--
-
-If you want, I can also generate:
-- a **shorter README** (more startup-style)
-- a **more enterprise README** (with guarantees, non-goals, and SLO wording)
-- a **badges section** (CI, rustfmt, clippy) once you add GitHub Actions
-

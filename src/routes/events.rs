@@ -1,8 +1,14 @@
-use axum::{extract::State, http::StatusCode, routing::post, Json, Router};
+use axum::{
+    extract::State,
+    http::{HeaderMap, StatusCode},
+    routing::post,
+    Json, Router,
+};
 use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
 
+use super::auth;
 use crate::state::AppState;
 
 pub fn routes() -> Router<AppState> {
@@ -19,6 +25,7 @@ struct CreateEventRequest {
 
 async fn create_event(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<CreateEventRequest>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     if req.event_type.trim().is_empty() {
@@ -33,6 +40,20 @@ async fn create_event(
             Json(json!({ "ok": false, "error": "idempotency_key is required" })),
         );
     }
+    if let Err(rejection) = auth::authorize_tenant(&state, &headers, req.tenant_id).await {
+        return rejection;
+    }
+
+    let mut tx = match state.pool.begin().await {
+        Ok(tx) => tx,
+        Err(e) => {
+            tracing::error!(error=%e, tenant_id=%req.tenant_id, "failed to begin transaction");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "ok": false, "error": "failed to begin transaction" })),
+            );
+        }
+    };
 
     // ---- Payload size enforcement ----
     let pol = match sqlx::query!(
@@ -43,17 +64,17 @@ async fn create_event(
         "#,
         req.tenant_id
     )
-    .fetch_optional(&state.pool)
+    .fetch_optional(&mut *tx)
     .await
     {
         Ok(v) => v,
         Err(e) => {
+            let _ = tx.rollback().await;
+            tracing::error!(error=%e, tenant_id=%req.tenant_id, "failed to load tenant policy");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(
-                    json!({ "ok": false, "error": "failed to load tenant policy", "details": e.to_string() }),
-                ),
-            )
+                Json(json!({ "ok": false, "error": "failed to load tenant policy" })),
+            );
         }
     };
 
@@ -63,12 +84,11 @@ async fn create_event(
     let payload_bytes = match serde_json::to_vec(&req.payload) {
         Ok(b) => b,
         Err(e) => {
+            tracing::error!(error=%e, tenant_id=%req.tenant_id, "invalid payload json");
             return (
                 StatusCode::BAD_REQUEST,
-                Json(
-                    json!({ "ok": false, "error": "invalid payload json", "details": e.to_string() }),
-                ),
-            )
+                Json(json!({ "ok": false, "error": "invalid payload json" })),
+            );
         }
     };
 
@@ -100,17 +120,17 @@ async fn create_event(
         req.payload,
         req.idempotency_key
     )
-    .fetch_one(&state.pool)
+    .fetch_one(&mut *tx)
     .await
     {
         Ok(row) => row,
         Err(e) => {
+            let _ = tx.rollback().await;
+            tracing::error!(error=%e, tenant_id=%req.tenant_id, "failed to create event");
             return (
                 StatusCode::BAD_REQUEST,
-                Json(
-                    json!({ "ok": false, "error": "failed to create event", "details": e.to_string() }),
-                ),
-            )
+                Json(json!({ "ok": false, "error": "failed to create event" })),
+            );
         }
     };
 
@@ -125,33 +145,21 @@ async fn create_event(
         "#,
         req.tenant_id
     )
-    .fetch_all(&state.pool)
+    .fetch_all(&mut *tx)
     .await
     {
         Ok(rows) => rows,
         Err(e) => {
+            let _ = tx.rollback().await;
+            tracing::error!(error=%e, tenant_id=%req.tenant_id, "failed to load endpoints");
             return (
                 StatusCode::BAD_REQUEST,
-                Json(
-                    json!({ "ok": false, "error": "failed to load endpoints", "details": e.to_string() }),
-                ),
-            )
+                Json(json!({ "ok": false, "error": "failed to load endpoints" })),
+            );
         }
     };
 
     // 3) Create deliveries + enqueue jobs
-    let mut tx = match state.pool.begin().await {
-        Ok(tx) => tx,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(
-                    json!({ "ok": false, "error": "failed to begin transaction", "details": e.to_string() }),
-                ),
-            )
-        }
-    };
-
     let mut created_deliveries = 0usize;
     let mut jobs_enqueued = 0usize;
 
@@ -162,7 +170,7 @@ async fn create_event(
             r#"
             INSERT INTO deliveries (id, event_id, endpoint_id, status, attempts_count, next_run_at)
             VALUES ($1, $2, $3, 'pending', 0, now())
-            ON CONFLICT (event_id, endpoint_id)
+            ON CONFLICT (event_id, endpoint_id) WHERE is_replay = false
             DO NOTHING
             RETURNING id
             "#,
@@ -176,11 +184,10 @@ async fn create_event(
             Ok(v) => v,
             Err(e) => {
                 let _ = tx.rollback().await;
+                tracing::error!(error=%e, event_id=%event_id, endpoint_id=%ep.id, "failed to create delivery");
                 return (
                     StatusCode::BAD_REQUEST,
-                    Json(
-                        json!({ "ok": false, "error": "failed to create delivery", "details": e.to_string() }),
-                    ),
+                    Json(json!({ "ok": false, "error": "failed to create delivery" })),
                 );
             }
         };
@@ -203,11 +210,10 @@ async fn create_event(
             .await
             {
                 let _ = tx.rollback().await;
+                tracing::error!(error=%e, event_id=%event_id, delivery_id=%row.id, "failed to enqueue job");
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(
-                        json!({ "ok": false, "error": "failed to enqueue job", "details": e.to_string() }),
-                    ),
+                    Json(json!({ "ok": false, "error": "failed to enqueue job" })),
                 );
             }
 
@@ -216,11 +222,10 @@ async fn create_event(
     }
 
     if let Err(e) = tx.commit().await {
+        tracing::error!(error=%e, event_id=%event_id, "failed to commit transaction");
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                json!({ "ok": false, "error": "failed to commit transaction", "details": e.to_string() }),
-            ),
+            Json(json!({ "ok": false, "error": "failed to commit transaction" })),
         );
     }
 

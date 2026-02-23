@@ -1,4 +1,5 @@
 pub mod config;
+pub mod crypto;
 pub mod db;
 pub mod queue;
 pub mod routes;
