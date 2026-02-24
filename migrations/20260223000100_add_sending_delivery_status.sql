@@ -1,3 +1,4 @@
+-- no-transaction
 DO $$
 BEGIN
   ALTER TYPE delivery_status ADD VALUE IF NOT EXISTS 'sending';
